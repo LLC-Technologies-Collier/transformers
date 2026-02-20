@@ -149,7 +149,7 @@ def get_processor_types_from_config_class(config_class, allowed_mappings=None):
         processor_types = _to_tuple(PROCESSOR_MAPPING[config_class])
     else:
         if config_class in TOKENIZER_MAPPING and "tokenizer" in allowed_mappings:
-            processor_types = TOKENIZER_MAPPING[config_class]
+            processor_types = _to_tuple(TOKENIZER_MAPPING[config_class])
 
         if config_class in IMAGE_PROCESSOR_MAPPING and "image_processor" in allowed_mappings:
             processor_types += _to_tuple(IMAGE_PROCESSOR_MAPPING[config_class])
