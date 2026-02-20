@@ -184,7 +184,31 @@ def get_architectures_from_config_class(config_class, arch_mappings, models_to_s
 
     for mapping in arch_mappings:
         if config_class in mapping:
-            models = mapping[config_class]
+
+            try:
+                models = mapping[config_class]
+            except ValueError as e:
+                import re, importlib, inspect
+
+                # Extract missing model name from error message
+                match = re.search(r'Could not find (\w+)', str(e))
+                missing_model_name = match.group(1) if match else None
+
+                # Get the package module from config_class
+                module_path = config_class.__module__.rsplit('.', 1)[0]  # e.g. 'transformers.models.voxtral_realtime'
+                module = importlib.import_module(module_path)
+
+                # Find modeling_* submodule names
+                modeling_names = [name for name in dir(module) if name.startswith('modeling_')]
+
+                models = ()
+                for modeling_name in modeling_names:
+                    modeling_module = getattr(module, modeling_name)
+                    _models = getattr(modeling_module, missing_model_name, None)
+                    if models is not None:
+                        models = _models
+                        break
+
             models = tuple(models) if isinstance(models, collections.abc.Sequence) else (models,)
             for model in models:
                 if model.__name__ not in models_to_skip:
