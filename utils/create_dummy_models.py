@@ -39,7 +39,7 @@ from transformers import (
     LayoutLMv3TokenizerFast,
     PreTrainedTokenizerFast,
     PythonBackend,
-    logging,
+    logging, ViTImageProcessor,
 )
 from transformers.feature_extraction_utils import FeatureExtractionMixin
 from transformers.file_utils import is_torch_available
@@ -881,7 +881,7 @@ def build_composite_models(config_class, output_dir):
     elif config_class.model_type == "vision-encoder-decoder":
         encoder_config_class = ViTConfig
         decoder_config_class = GPT2Config
-        encoder_processor = (ViTFeatureExtractor,)
+        encoder_processor = (ViTImageProcessor,)
         decoder_processor = (GPT2TokenizerFast, GPT2Tokenizer)
         encoder_class = ViTModel
         decoder_class = GPT2LMHeadModel
@@ -898,7 +898,7 @@ def build_composite_models(config_class, output_dir):
         # Not encoder-decoder, but encoder-encoder. We just keep the same name as above to make code easier
         encoder_config_class = ViTConfig
         decoder_config_class = BertConfig
-        encoder_processor = (ViTFeatureExtractor,)
+        encoder_processor = (ViTImageProcessor,)
         decoder_processor = (BertTokenizerFast, BertTokenizer)
         encoder_class = ViTModel
         decoder_class = BertModel
