@@ -860,7 +860,6 @@ def build_composite_models(config_class, output_dir):
         VisionEncoderDecoderModel,
         VisionTextDualEncoderModel,
         ViTConfig,
-        ViTFeatureExtractor,
         ViTModel,
         Wav2Vec2Config,
         Wav2Vec2Model,
