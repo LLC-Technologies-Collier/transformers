@@ -10,7 +10,7 @@ on:
 
 env:
   TOKEN: ${{ secrets.TRANSFORMERS_HUB_BOT_HF_TOKEN }}
-  HF_TOKEN: ${{ secrets.HF_TOKEN_TEMP }}
+  HF_TOKEN: ${{ secrets.HF_HUB_READ_TOKEN }}
 
 jobs:
   check_tiny_models:

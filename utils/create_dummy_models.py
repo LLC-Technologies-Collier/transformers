@@ -293,33 +293,34 @@ def build_processor(config_class, processor_class, allow_no_checkpoint=False):
                     f"`config` (which is of type {config.__class__.__name__}) should be an instance of `config_class`"
                     f" ({config_class.__name__})!"
                 )
-            tokenizer_class = config.tokenizer_class
-            new_processor_class = None
-            if tokenizer_class is not None:
-                new_processor_class = getattr(transformers_module, tokenizer_class)
-                if new_processor_class != processor_class:
-                    processor = build_processor(config_class, new_processor_class)
-            # If `tokenizer_class` is not specified in `config`, let's use `config` to get the process class via auto
-            # mappings, but only allow the tokenizer mapping being used. This is to make `Wav2Vec2Conformer` build
-            if processor is None:
-                new_processor_classes = get_processor_types_from_config_class(
-                    config.__class__, allowed_mappings=["tokenizer"]
-                )
-                # Used to avoid infinite recursion between a pair of fast/slow tokenizer types
-                names = [
-                    x.__name__.replace("Fast", "") for x in [processor_class, new_processor_class] if x is not None
-                ]
-                new_processor_classes = [
-                    x for x in new_processor_classes if x is not None and x.__name__.replace("Fast", "") not in names
-                ]
-                if len(new_processor_classes) > 0:
-                    new_processor_class = new_processor_classes[0]
-                    # Let's use fast tokenizer if there is any
-                    for x in new_processor_classes:
-                        if x.__name__.endswith("Fast"):
-                            new_processor_class = x
-                            break
-                    processor = build_processor(config_class, new_processor_class)
+            if getattr(config, "tokenizer_class", None) is not None:
+                tokenizer_class = config.tokenizer_class
+                new_processor_class = None
+                if tokenizer_class is not None:
+                    new_processor_class = getattr(transformers_module, tokenizer_class)
+                    if new_processor_class != processor_class:
+                        processor = build_processor(config_class, new_processor_class)
+                # If `tokenizer_class` is not specified in `config`, let's use `config` to get the process class via auto
+                # mappings, but only allow the tokenizer mapping being used. This is to make `Wav2Vec2Conformer` build
+                if processor is None:
+                    new_processor_classes = get_processor_types_from_config_class(
+                        config.__class__, allowed_mappings=["tokenizer"]
+                    )
+                    # Used to avoid infinite recursion between a pair of fast/slow tokenizer types
+                    names = [
+                        x.__name__.replace("Fast", "") for x in [processor_class, new_processor_class] if x is not None
+                    ]
+                    new_processor_classes = [
+                        x for x in new_processor_classes if x is not None and x.__name__.replace("Fast", "") not in names
+                    ]
+                    if len(new_processor_classes) > 0:
+                        new_processor_class = new_processor_classes[0]
+                        # Let's use fast tokenizer if there is any
+                        for x in new_processor_classes:
+                            if x.__name__.endswith("Fast"):
+                                new_processor_class = x
+                                break
+                        processor = build_processor(config_class, new_processor_class)
 
     if processor is None:
         # Try to build each component (tokenizer & feature extractor) of a `ProcessorMixin`.
