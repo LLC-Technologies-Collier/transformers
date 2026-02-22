@@ -1217,6 +1217,8 @@ def build_tiny_model_summary(results, organization=None, token=None):
         try:
             processors = [key for key, value in results[config_name]["processor"].items()]
         except:
+            # This happens for `VisionEncoderDecoderConfig` and `SpeechEncoderDecoderConfig`.
+            # Not a prority however.
             print(config_name)
             print(results[config_name])
             print("******************************")
