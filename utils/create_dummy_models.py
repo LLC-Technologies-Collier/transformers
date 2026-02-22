@@ -1111,7 +1111,7 @@ def build(config_class, models_to_create, output_dir):
             errors.append(error)
             traces.append(trace)
             # fill_result_with_error(result, error, trace, models_to_create)
-            logger.error(result["error"][0])
+            logger.error((error, trace))
             # TODO: add trace and error anyway?
             # Let's return all what we could build
             # return result
