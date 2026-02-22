@@ -39,7 +39,7 @@ from transformers import (
     LayoutLMv3TokenizerFast,
     PreTrainedTokenizerFast,
     PythonBackend,
-    logging, ViTImageProcessor,
+    logging, ViTImageProcessor, AutoImageProcessor, AutoFeatureExtractor, AutoVideoProcessor,
 )
 from transformers.feature_extraction_utils import FeatureExtractionMixin
 from transformers.file_utils import is_torch_available
@@ -163,6 +163,9 @@ def get_processor_types_from_config_class(config_class, allowed_mappings=None):
     # We might get `None` for some tokenizers - remove them here.
     processor_types = tuple(p for p in processor_types if p is not None)
 
+    # Add what ever auto types
+    processor_types += (AutoTokenizer, AutoImageProcessor, AutoFeatureExtractor, AutoVideoProcessor)
+
     return processor_types
 
 
@@ -256,7 +259,7 @@ def build_processor(config_class, processor_class, allow_no_checkpoint=False):
     # Currently, this solely uses the docstring in the source file of `config_class` to find a checkpoint.
     checkpoint = get_checkpoint_from_config_class(config_class)
 
-    if checkpoint is None:
+    if checkpoint is None and not processor_class.__name__.startswith("Auto"):
         # try to get the checkpoint from the config class for `processor_class`.
         # This helps cases like `XCLIPConfig` and `VideoMAEFeatureExtractor` to find a checkpoint from `VideoMAEConfig`.
         config_class_from_processor_class = get_config_class_from_processor_class(processor_class)
@@ -1094,17 +1097,28 @@ def build(config_class, models_to_create, output_dir):
         logger.error(result["error"][0])
         return result
 
+    traces = []
+    errors = []
     for processor_class in processor_classes:
         try:
             processor = build_processor(config_class, processor_class, allow_no_checkpoint=True)
             if processor is not None:
-                result["processor"][processor_class] = processor
+                if type(processor) not in result["processor"]:
+                    result["processor"][type(processor)] = processor
         except Exception:
             error = f"Failed to build processor for {processor_class.__name__}."
             trace = traceback.format_exc()
-            fill_result_with_error(result, error, trace, models_to_create)
+            errors.append(error)
+            traces.append(trace)
+            # fill_result_with_error(result, error, trace, models_to_create)
             logger.error(result["error"][0])
-            return result
+            # TODO: add trace and error anyway?
+            # Let's return all what we could build
+            # return result
+    if len(errors) > 0:
+        error = "\n".join(errors)
+        trace = "\n".join(traces)
+        fill_result_with_error(result, error, trace, models_to_create)
 
     if len(result["processor"]) == 0:
         error = f"No processor could be built for {config_class.__name__}."
