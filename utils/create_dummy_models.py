@@ -474,7 +474,7 @@ def convert_tokenizer(tokenizer_fast: PreTrainedTokenizerFast):
 
     # Make sure it at least runs
     if not isinstance(new_tokenizer, LayoutLMv3TokenizerFast):
-        new_tokenizer(data["testing_ds"]["text"])
+        new_tokenizer(list(data["testing_ds"]["text"]))
 
     return new_tokenizer
 
