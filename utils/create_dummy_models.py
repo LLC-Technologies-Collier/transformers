@@ -346,7 +346,7 @@ def build_processor(config_class, processor_class, allow_no_checkpoint=False):
                     processor = processor_class(**{k: v[0] for k, v in attrs.items()})
                 except Exception as e:
                     logger.error(f"{e.__class__.__name__}: {e}")
-        else:
+        elif not processor_class.__name__.startswith("Auto"):
             # `checkpoint` might lack some file(s) to load a processor. For example, `facebook/hubert-base-ls960`
             # has no tokenizer file to load `Wav2Vec2CTCTokenizer`. In this case, we try to build a processor
             # with the configuration class (for example, `Wav2Vec2Config`) corresponding to `processor_class`.
