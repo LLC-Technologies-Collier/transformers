@@ -259,6 +259,10 @@ def build_processor(config_class, processor_class, allow_no_checkpoint=False):
     # Currently, this solely uses the docstring in the source file of `config_class` to find a checkpoint.
     checkpoint = get_checkpoint_from_config_class(config_class)
 
+    # New method that is more robust to get checkpoints!
+
+    # breakpoint()
+
     if checkpoint is None and not processor_class.__name__.startswith("Auto"):
         # try to get the checkpoint from the config class for `processor_class`.
         # This helps cases like `XCLIPConfig` and `VideoMAEFeatureExtractor` to find a checkpoint from `VideoMAEConfig`.
@@ -1100,6 +1104,7 @@ def build(config_class, models_to_create, output_dir):
 
     traces = []
     errors = []
+    # breakpoint()
     for processor_class in processor_classes:
         try:
             processor = build_processor(config_class, processor_class, allow_no_checkpoint=True)
@@ -1107,6 +1112,7 @@ def build(config_class, models_to_create, output_dir):
                 if type(processor) not in result["processor"]:
                     result["processor"][type(processor)] = processor
         except Exception:
+            # breakpoint()
             error = f"Failed to build processor for {processor_class.__name__}."
             trace = traceback.format_exc()
             errors.append(error)
@@ -1122,11 +1128,13 @@ def build(config_class, models_to_create, output_dir):
         fill_result_with_error(result, error, trace, models_to_create)
 
     if len(result["processor"]) == 0:
+        # breakpoint()
         error = f"No processor could be built for {config_class.__name__}."
         fill_result_with_error(result, error, None, models_to_create)
         logger.error(result["error"][0])
         return result
 
+    # breakpoint()
     try:
         tiny_config = get_tiny_config(config_class)
     except Exception as e:
@@ -1139,6 +1147,7 @@ def build(config_class, models_to_create, output_dir):
     # Convert the processors (reduce vocabulary size, smaller image size, etc.)
     processors = list(result["processor"].values())
     processor_output_folder = os.path.join(output_dir, "processors")
+    # breakpoint()
     try:
         processors = convert_processors(processors, tiny_config, processor_output_folder, result)
     except Exception:
@@ -1147,6 +1156,7 @@ def build(config_class, models_to_create, output_dir):
         result["warnings"].append((error, trace))
 
     if len(processors) == 0:
+        # breakpoint()
         error = f"No processor is returned by `convert_processors` for {config_class.__name__}."
         fill_result_with_error(result, error, None, models_to_create)
         logger.error(result["error"][0])
@@ -1508,6 +1518,8 @@ if __name__ == "__main__":
 
     if not args.all and not args.model_types:
         raise ValueError("Please provide at least one model type or pass `--all` to export all architectures.")
+
+    # os.environ["HF_TOKEN"] = args.token
 
     create_tiny_models(
         args.output_path,
