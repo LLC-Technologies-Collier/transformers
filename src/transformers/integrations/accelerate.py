@@ -1,3 +1,4 @@
+# Copyright 2026 Google LLC and contributors.
 # Copyright 2025 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -506,7 +507,11 @@ def load_offloaded_parameter(model: "PreTrainedModel", param_name: str) -> torch
     module_parts = param_name.split(".")
     modules_to_check = [".".join(module_parts[:-idx]) for idx in range(1, len(module_parts))] + [""]
     for parent_name in modules_to_check:
-        parent = model.get_submodule(parent_name)
+        try:
+            parent = model.get_submodule(parent_name)
+        except AttributeError:
+            continue
+            
         if hasattr(parent, "_hf_hook"):
             weights_map = parent._hf_hook.weights_map
             truncated_param_name = param_name.replace(f"{parent_name}." if parent_name != "" else parent_name, "")
