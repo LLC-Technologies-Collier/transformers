@@ -548,9 +548,10 @@ def load_offloaded_parameter(model: "PreTrainedModel", param_name: str) -> torch
             "the corresponding hook for it in any module."
         )
 
-    # This call loads it from disk
+    # This call loads it from disk. We clone it to avoid shared memory issues
+    # when saving multiple shards that might point to the same offloaded buffer.
     tensor = weights_map[truncated_param_name]
-    return tensor
+    return tensor.clone() if torch.is_tensor(tensor) else tensor
 
 
 def _init_infer_auto_device_map(
