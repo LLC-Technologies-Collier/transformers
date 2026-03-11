@@ -1,3 +1,4 @@
+# Copyright 2026 Google LLC and contributors.
 # Copyright 2018 The Google AI Language Team Authors, Facebook AI Research authors and The HuggingFace Inc. team.
 # Copyright (c) 2018, NVIDIA CORPORATION.  All rights reserved.
 #
@@ -414,7 +415,10 @@ def remove_tied_weights_from_state_dict(
             # In offloaded cases, there may be meta tensors in the state_dict.
             # For these cases, key by the pointer of the original tensor object
             # (state_dict tensors are detached and therefore no longer shared)
-            tensor = model.get_parameter(name)
+            try:
+                tensor = model.get_parameter(name)
+            except AttributeError:
+                tensor = model.get_buffer(name)
             ptrs[id(tensor)].append(name)
 
         else:
