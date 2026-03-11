@@ -3198,6 +3198,7 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
         token: str | bool | None = None,
         save_peft_format: bool = True,
         save_original_format: bool = True,
+        safe_serialization: bool = True,
         **kwargs,
     ):
         """
@@ -3377,10 +3378,10 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
 
         # Shard the model if it is too big.
         if not _hf_peft_config_loaded:
-            weights_name = SAFE_WEIGHTS_NAME
+            weights_name = SAFE_WEIGHTS_NAME if safe_serialization else WEIGHTS_NAME
             weights_name = _add_variant(weights_name, variant)
         else:
-            weights_name = ADAPTER_SAFE_WEIGHTS_NAME
+            weights_name = ADAPTER_SAFE_WEIGHTS_NAME if safe_serialization else "adapter_model.bin"
 
         filename_pattern = weights_name.replace(".bin", "{suffix}.bin").replace(".safetensors", "{suffix}.safetensors")
         state_dict_split = split_torch_state_dict_into_shards(
@@ -3436,7 +3437,10 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
             # TODO: it would be very nice to do the writing concurrently, but safetensors never releases the GIL,
             # so it's not possible for now....
             # Write the shard to disk
-            safe_save_file(shard_state_dict, filename, metadata=metadata)
+            if safe_serialization:
+                safe_save_file(shard_state_dict, filename, metadata=metadata)
+            else:
+                torch.save(shard_state_dict, filename)
             # Cleanup the data before next loop (important with offloading, so we don't blowup cpu RAM)
             del shard_state_dict
 
@@ -3444,7 +3448,7 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
             path_to_weights = os.path.join(save_directory, weights_name)
             logger.info(f"Model weights saved in {path_to_weights}")
         else:
-            save_index_file = SAFE_WEIGHTS_INDEX_NAME
+            save_index_file = SAFE_WEIGHTS_INDEX_NAME if safe_serialization else WEIGHTS_INDEX_NAME
             save_index_file = os.path.join(save_directory, _add_variant(save_index_file, variant))
             # Save the index as well
             with open(save_index_file, "w", encoding="utf-8") as f:
