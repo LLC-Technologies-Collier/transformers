@@ -512,7 +512,7 @@ def load_offloaded_parameter(model: "PreTrainedModel", param_name: str) -> torch
         except AttributeError:
             continue
             
-        if hasattr(parent, "_hf_hook"):
+        if hasattr(parent, "_hf_hook") and hasattr(parent._hf_hook, "weights_map") and parent._hf_hook.weights_map:
             weights_map = parent._hf_hook.weights_map
             truncated_param_name = param_name.replace(f"{parent_name}." if parent_name != "" else parent_name, "")
             break
