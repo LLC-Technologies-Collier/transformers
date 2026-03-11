@@ -513,9 +513,10 @@ def load_offloaded_parameter(model: "PreTrainedModel", param_name: str) -> torch
             continue
             
         if hasattr(parent, "_hf_hook") and hasattr(parent._hf_hook, "weights_map") and parent._hf_hook.weights_map:
-            weights_map = parent._hf_hook.weights_map
             truncated_param_name = param_name.replace(f"{parent_name}." if parent_name != "" else parent_name, "")
-            break
+            if truncated_param_name in parent._hf_hook.weights_map:
+                weights_map = parent._hf_hook.weights_map
+                break
     # If we did not break the loop, something is wrong
     else:
         raise ValueError(
