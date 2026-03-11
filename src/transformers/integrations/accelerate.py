@@ -1,4 +1,4 @@
-# Copyright 2026 Google LLC and contributors.
+# Some changes Copyright 2026 Google LLC and contributors.
 # Copyright 2025 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -506,10 +506,13 @@ def load_offloaded_parameter(model: "PreTrainedModel", param_name: str) -> torch
     # Start from the most inner module, and try to find the hook that was used for offloading the param
     module_parts = param_name.split(".")
     modules_to_check = [".".join(module_parts[:-idx]) for idx in range(1, len(module_parts))] + [""]
+    weights_map = None
+    truncated_param_name = None
+
     for parent_name in modules_to_check:
         try:
             parent = model.get_submodule(parent_name)
-        except AttributeError:
+        except (AttributeError, KeyError):
             continue
             
         if hasattr(parent, "_hf_hook") and hasattr(parent._hf_hook, "weights_map") and parent._hf_hook.weights_map:
@@ -517,11 +520,32 @@ def load_offloaded_parameter(model: "PreTrainedModel", param_name: str) -> torch
             if truncated_param_name in parent._hf_hook.weights_map:
                 weights_map = parent._hf_hook.weights_map
                 break
-    # If we did not break the loop, something is wrong
-    else:
+
+    # Aggressive fallback: if not found via parent walk, search all modules for any hook containing this weight
+    if weights_map is None:
+        for name, module in model.named_modules():
+            if hasattr(module, "_hf_hook") and hasattr(module._hf_hook, "weights_map") and module._hf_hook.weights_map:
+                # Exact match
+                if param_name in module._hf_hook.weights_map:
+                    weights_map = module._hf_hook.weights_map
+                    truncated_param_name = param_name
+                    break
+                # Relative match (try all suffixes)
+                parts = param_name.split(".")
+                for i in range(len(parts)):
+                    sub_name = ".".join(parts[i:])
+                    if sub_name in module._hf_hook.weights_map:
+                        weights_map = module._hf_hook.weights_map
+                        truncated_param_name = sub_name
+                        break
+                if weights_map:
+                    break
+
+    # If we still didn't find it, something is wrong
+    if weights_map is None:
         raise ValueError(
             f"{param_name} is on the meta device because it was offloaded, but we could not find "
-            "the corresponding hook for it"
+            "the corresponding hook for it in any module."
         )
 
     # This call loads it from disk
