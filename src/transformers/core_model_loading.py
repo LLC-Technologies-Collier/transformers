@@ -1556,7 +1556,10 @@ def convert_and_load_state_dict_in_model(
     pattern_to_converter = {k: converter for converter in converters for k in converter.source_patterns}
 
     state_dict = sorted(state_dict.items(), key=lambda kv: dot_natural_key(kv[0]))
-    for original_key, tensor in state_dict:
+    total_keys = len(state_dict)
+    for i, (original_key, tensor) in enumerate(state_dict):
+        if i % 100 == 0:
+            print(f"DEBUG: Processing weight {i}/{total_keys}: {original_key}...")
         # 1. Rename the key according to all renaming and weight conversion patterns.
         renamed_key, source_pattern = rename_source_key(
             original_key, renamings, converters, base_model_prefix, meta_model_state_dict

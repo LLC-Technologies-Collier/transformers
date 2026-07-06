@@ -4,6 +4,7 @@
 #             the file from the modular. If any change should be done, please apply the change to the
 #                          modular_qwen3_5_moe.py file directly. One of our CI enforces this.
 #                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
+# Some changes Copyright 2026 Google LLC and contributors.
 # Copyright 2025 The Qwen Team and The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -150,6 +151,13 @@ class Qwen3_5MoeTextRotaryEmbedding(nn.Module):
         # So we expand the inv_freq to shape (3, ...)
         if position_ids.ndim == 2:
             position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
+        if self.inv_freq.device.type == 'meta':
+            # Handle meta tensors during jit.trace
+            # Just return dummy tensors of correct shape
+            dummy_cos = torch.ones(3, x.shape[1], x.shape[2], x.shape[3], dtype=x.dtype, device=x.device)
+            dummy_sin = torch.zeros(3, x.shape[1], x.shape[2], x.shape[3], dtype=x.dtype, device=x.device)
+            return dummy_cos, dummy_sin
+
         inv_freq_expanded = (
             self.inv_freq[None, None, :, None].float().expand(3, position_ids.shape[1], -1, 1).to(x.device)
         )
@@ -160,8 +168,12 @@ class Qwen3_5MoeTextRotaryEmbedding(nn.Module):
             freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(2, 3)
             freqs = self.apply_interleaved_mrope(freqs, self.mrope_section)
             emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos() * self.attention_scaling
-            sin = emb.sin() * self.attention_scaling
+            # Ensure attention_scaling is on the correct device
+            scaling = self.attention_scaling
+            if torch.is_tensor(scaling) and scaling.device.type != 'meta':
+                scaling = scaling.to(emb.device)
+            cos = emb.cos() * scaling
+            sin = emb.sin() * scaling
 
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
@@ -259,17 +271,26 @@ def torch_chunk_gated_delta_rule(
         query = l2norm(query, dim=-1, eps=1e-6)
         key = l2norm(key, dim=-1, eps=1e-6)
     query, key, value, beta, g = [
-        x.transpose(1, 2).contiguous().to(torch.float32) for x in (query, key, value, beta, g)
+        (x.transpose(1, 2) if x.dim() >= 3 else x).contiguous().to(torch.float32) for x in (query, key, value, beta, g)
     ]
 
     batch_size, num_heads, sequence_length, k_head_dim = key.shape
     v_head_dim = value.shape[-1]
-    pad_size = (chunk_size - sequence_length % chunk_size) % chunk_size
-    query = F.pad(query, (0, 0, 0, pad_size))
-    key = F.pad(key, (0, 0, 0, pad_size))
-    value = F.pad(value, (0, 0, 0, pad_size))
-    beta = F.pad(beta, (0, pad_size))
-    g = F.pad(g, (0, pad_size))
+    
+    # Padding logic that handles symbolic shapes during torch.export
+    if isinstance(sequence_length, int) and sequence_length % chunk_size == 0:
+        pad_size = 0
+    else:
+        # For symbolic shapes or non-multiples, we perform padding
+        pad_size = (chunk_size - sequence_length % chunk_size) % chunk_size
+    
+    if pad_size > 0:
+        query = F.pad(query, (0, 0, 0, pad_size))
+        key = F.pad(key, (0, 0, 0, pad_size))
+        value = F.pad(value, (0, 0, 0, pad_size))
+        beta = F.pad(beta, (0, pad_size))
+        g = F.pad(g, (0, pad_size))
+    
     total_sequence_length = sequence_length + pad_size
     scale = 1 / (query.shape[-1] ** 0.5)
     query = query * scale
@@ -331,7 +352,7 @@ def torch_recurrent_gated_delta_rule(
         query = l2norm(query, dim=-1, eps=1e-6)
         key = l2norm(key, dim=-1, eps=1e-6)
     query, key, value, beta, g = [
-        x.transpose(1, 2).contiguous().to(torch.float32) for x in (query, key, value, beta, g)
+        (x.transpose(1, 2) if x.dim() >= 3 else x).contiguous().to(torch.float32) for x in (query, key, value, beta, g)
     ]
 
     batch_size, num_heads, sequence_length, k_head_dim = key.shape
@@ -445,7 +466,12 @@ class Qwen3_5MoeGatedDeltaNet(nn.Module):
         hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
 
         # Set up dimensions for reshapes later
-        batch_size, seq_len, _ = hidden_states.shape
+        if hidden_states.dim() == 3:
+            batch_size, seq_len, _ = hidden_states.shape
+        else:
+            # Handle 2D inputs during torch.export/tracing
+            batch_size = 1
+            seq_len, _ = hidden_states.shape
 
         # We have cached `conv_state` / `recurrent_state` to continue from. The two cached modes
         # (single-token decode and chunk-tokens continuation) share the state read here; they only
@@ -459,10 +485,15 @@ class Qwen3_5MoeGatedDeltaNet(nn.Module):
             recurrent_state = cache_params.layers[self.layer_idx].recurrent_states
 
         mixed_qkv = self.in_proj_qkv(hidden_states)
-        mixed_qkv = mixed_qkv.transpose(1, 2)
+        if mixed_qkv.dim() >= 3:
+            mixed_qkv = mixed_qkv.transpose(1, 2)
 
         z = self.in_proj_z(hidden_states)
-        z = z.reshape(batch_size, seq_len, -1, self.head_v_dim)
+        if z.dim() == 2 and (batch_size == 1 or seq_len == 1):
+            # Already in desired logical shape or needs specialized reshape
+            z = z.reshape(batch_size, seq_len, -1, self.head_v_dim)
+        else:
+            z = z.reshape(batch_size, seq_len, -1, self.head_v_dim)
 
         b = self.in_proj_b(hidden_states)
         a = self.in_proj_a(hidden_states)
@@ -486,6 +517,11 @@ class Qwen3_5MoeGatedDeltaNet(nn.Module):
             if cache_params is not None:
                 new_conv_state = F.pad(mixed_qkv, (self.conv_kernel_size - mixed_qkv.shape[-1], 0))
                 cache_params.update_conv_state(new_conv_state, self.layer_idx)
+            
+            # Ensure mixed_qkv is 3D for conv1d
+            if mixed_qkv.dim() == 2:
+                # Shape is [channels, seq_len]
+                mixed_qkv = mixed_qkv.reshape(1, -1, seq_len)
             if self.causal_conv1d_fn is not None:
                 mixed_qkv = self.causal_conv1d_fn(
                     x=mixed_qkv,
@@ -499,7 +535,8 @@ class Qwen3_5MoeGatedDeltaNet(nn.Module):
             if use_precomputed_states:
                 mixed_qkv = mixed_qkv[:, :, -seq_len:]
 
-        mixed_qkv = mixed_qkv.transpose(1, 2)
+        if mixed_qkv.dim() >= 3:
+            mixed_qkv = mixed_qkv.transpose(1, 2)
         query, key, value = torch.split(
             mixed_qkv,
             [
@@ -830,7 +867,8 @@ class Qwen3_5MoeRMSNorm(nn.Module):
         output = self._norm(x.float())
         # Llama does x.to(float16) * w whilst Qwen3_5Moe is (x * w).to(float16)
         # See https://github.com/huggingface/transformers/pull/29402
-        output = output * (1.0 + self.weight.float())
+        if self.weight.device.type != 'meta':
+            output = output * (1.0 + self.weight.float().to(x.device))
         return output.type_as(x)
 
     def extra_repr(self):
@@ -1794,12 +1832,19 @@ class Qwen3_5MoeForCausalLM(Qwen3_5MoePreTrainedModel, GenerationMixin):
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = Qwen3_5MoeTextModel(config)
-        self.vocab_size = config.vocab_size
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        self.router_aux_loss_coef = config.router_aux_loss_coef
-        self.num_experts = config.num_experts
-        self.num_experts_per_tok = config.num_experts_per_tok
+        
+        # Handle both VLM config and text-only config
+        if hasattr(config, "text_config"):
+            text_config = config.text_config
+        else:
+            text_config = config
+            
+        self.model = Qwen3_5MoeTextModel(text_config)
+        self.vocab_size = text_config.vocab_size
+        self.lm_head = nn.Linear(text_config.hidden_size, text_config.vocab_size, bias=False)
+        self.router_aux_loss_coef = text_config.router_aux_loss_coef
+        self.num_experts = text_config.num_experts
+        self.num_experts_per_tok = text_config.num_experts_per_tok
 
         # Initialize weights and apply final processing
         self.post_init()

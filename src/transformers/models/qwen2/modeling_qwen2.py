@@ -218,27 +218,43 @@ class Qwen2Attention(nn.Module):
         key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
-        cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        cos, sin = position_embeddings if isinstance(position_embeddings, tuple) else (None, None)
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin) if cos is not None else (query_states, key_states)
 
-        if past_key_values is not None:
+        # Store original key/value states for the plugin before they are merged with history
+        key_states_original, value_states_original = key_states, value_states
+
+        if past_key_values is not None and not torch.jit.is_tracing():
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
 
         attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
             self.config._attn_implementation, eager_attention_forward
         )
 
+        attn_kwargs = kwargs.copy()
+        attn_kwargs.pop("rope_rotary_cos_sin", None)
+        attn_kwargs.pop("past_key_value", None)
+
         attn_output, attn_weights = attention_interface(
             self,
             query_states,
-            key_states,
-            value_states,
+            key_states_original if torch.jit.is_tracing() else key_states,
+            value_states_original if torch.jit.is_tracing() else value_states,
             attention_mask,
             dropout=0.0 if not self.training else self.attention_dropout,
             scaling=self.scaling,
             sliding_window=self.sliding_window,  # main diff with Llama
-            **kwargs,
+            rope_rotary_cos_sin=kwargs.get("rope_rotary_cos_sin"),
+            past_key_value=torch.stack([key_states, value_states], dim=1),
+            **attn_kwargs,
         )
+
+        if torch.jit.is_tracing() and past_key_values is not None:
+            # attn_weights contains the present_key_value from the plugin [B, 2, H, S, D]
+            # Update the cache object so it's returned by the model
+            k_present = attn_weights[:, 0, ...]
+            v_present = attn_weights[:, 1, ...]
+            past_key_values.update(k_present, v_present, self.layer_idx)
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
@@ -360,6 +376,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
         use_cache: bool | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
+        print(f"Qwen2Model.forward: input_ids is None={input_ids is None}, inputs_embeds is None={inputs_embeds is None}")
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
@@ -393,7 +410,12 @@ class Qwen2Model(Qwen2PreTrainedModel):
                 causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
 
         hidden_states = inputs_embeds
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        
+        # Use provided RoPE embeddings if available (for ONNX export)
+        if kwargs.get("rope_rotary_cos_sin") is not None:
+            position_embeddings = kwargs.get("rope_rotary_cos_sin")
+        else:
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         for i, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             hidden_states = decoder_layer(

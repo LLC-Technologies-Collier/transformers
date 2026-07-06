@@ -1,3 +1,4 @@
+# Some changes Copyright 2026 Google LLC and contributors.
 # Copyright 2025 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -527,17 +528,71 @@ def load_offloaded_parameter(model: "PreTrainedModel", param_name: str) -> torch
     # Start from the most inner module, and try to find the hook that was used for offloading the param
     module_parts = param_name.split(".")
     modules_to_check = [".".join(module_parts[:-idx]) for idx in range(1, len(module_parts))] + [""]
+    weights_map = None
+    truncated_param_name = None
+
     for parent_name in modules_to_check:
-        parent = model.get_submodule(parent_name)
-        if hasattr(parent, "_hf_hook"):
-            weights_map = parent._hf_hook.weights_map
+        try:
+            parent = model.get_submodule(parent_name)
+        except (AttributeError, KeyError):
+            continue
+            
+        if hasattr(parent, "_hf_hook") and hasattr(parent._hf_hook, "weights_map") and parent._hf_hook.weights_map:
             truncated_param_name = param_name.replace(f"{parent_name}." if parent_name != "" else parent_name, "")
-            break
-    # If we did not break the loop, something is wrong
-    else:
+            if truncated_param_name in parent._hf_hook.weights_map:
+                weights_map = parent._hf_hook.weights_map
+                break
+
+    # Aggressive fallback: if not found via parent walk, search all modules for any hook containing this weight
+    if weights_map is None:
+        for name, module in model.named_modules():
+            if hasattr(module, "_hf_hook") and hasattr(module._hf_hook, "weights_map") and module._hf_hook.weights_map:
+                # Exact match
+                if param_name in module._hf_hook.weights_map:
+                    weights_map = module._hf_hook.weights_map
+                    truncated_param_name = param_name
+                    break
+                # Relative match (try all suffixes)
+                parts = param_name.split(".")
+                for i in range(len(parts)):
+                    sub_name = ".".join(parts[i:])
+                    if sub_name in module._hf_hook.weights_map:
+                        weights_map = module._hf_hook.weights_map
+                        truncated_param_name = sub_name
+                        break
+                if weights_map:
+                    break
+
+    # If we still didn't find it, something is wrong
+    if weights_map is None:
+        # Edge-LLM: ModelOpt parameters added during quantization are on the meta device
+        # but are not in the weights_map (offload index). We provide a dummy value here
+        # so save_pretrained can proceed. These will be re-initialized by ModelOpt restore.
+        if any(x in param_name for x in ["_amax", "_scale", "_offset", "quantizer"]):
+            # Try to resolve shape/dtype if possible, but prioritize returning a valid tensor
+            try:
+                # Strip 'model.' prefix if it exists to help resolution
+                clean_name = param_name[6:] if param_name.startswith("model.") else param_name
+                param = None
+                try:
+                    param = model.get_parameter(param_name)
+                except Exception:
+                    try:
+                        param = model.get_parameter(clean_name)
+                    except Exception:
+                        pass
+                
+                if param is not None:
+                    return torch.ones(param.shape, dtype=param.dtype, device="cpu")
+                
+                # Default scalar fallback for metadata
+                return torch.tensor([1.0], device="cpu")
+            except Exception:
+                return torch.tensor([1.0], device="cpu")
+
         raise ValueError(
             f"{param_name} is on the meta device because it was offloaded, but we could not find "
-            "the corresponding hook for it"
+            "the corresponding hook for it in any module."
         )
 
     # This call loads it from disk

@@ -1,15 +1,21 @@
+# Copyright 2024 The HuggingFace Team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import torch
 
-from ..utils import is_torch_npu_available, is_torch_xpu_available, logging
-from ..utils.import_utils import is_torch_greater_or_equal
+from ..utils import is_torch_npu_available
 
 
-logger = logging.get_logger(__name__)
-
-
-_is_torch_greater_or_equal_than_2_5 = is_torch_greater_or_equal("2.5", accept_dev=True)
-_is_torch_greater_or_equal_than_2_8 = is_torch_greater_or_equal("2.8", accept_dev=True)
-_is_torch_xpu_available = is_torch_xpu_available()
 _is_torch_npu_available = is_torch_npu_available()
 
 
@@ -33,52 +39,33 @@ def use_gqa_in_sdpa(attention_mask: torch.Tensor | None, key: torch.Tensor, valu
     #   - key head_dim == value head_dim <= 256 (otherwise it will fall back to the math kernel)
     # 2.xpu
     #   - torch version >= 2.8
-    if _is_torch_xpu_available:
-        return _is_torch_greater_or_equal_than_2_8
+    try:
+        from ..utils.import_utils import is_torch_greater_or_equal
+        _is_torch_greater_or_equal_than_2_5 = is_torch_greater_or_equal("2.5", accept_dev=True)
+    except ImportError:
+        _is_torch_greater_or_equal_than_2_5 = True
     return _is_torch_greater_or_equal_than_2_5 and attention_mask is None and key.shape[-1] == value.shape[-1] <= 256
 
 
 def sdpa_attention_forward(
-    module: torch.nn.Module,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: torch.Tensor | None,
-    dropout: float = 0.0,
-    scaling: float | None = None,
-    is_causal: bool | None = None,
+    module,
+    query,
+    key,
+    value,
+    attention_mask=None,
+    dropout_p=0.0,
+    is_causal=None,
+    rope_rotary_cos_sin=None,
+    past_key_value=None, # Add this
     **kwargs,
-) -> tuple[torch.Tensor, None]:
-    if kwargs.get("output_attentions", False):
-        logger.warning_once(
-            "`sdpa` attention does not support `output_attentions=True`."
-            " Please set your attention to `eager` if you want any of these features."
-        )
-    sdpa_kwargs = {}
-    if hasattr(module, "num_key_value_groups") and module.num_key_value_groups > 1:
-        if not use_gqa_in_sdpa(attention_mask, key, value):
-            key = repeat_kv(key, module.num_key_value_groups)
-            value = repeat_kv(value, module.num_key_value_groups)
-        else:
-            sdpa_kwargs = {"enable_gqa": True}
-
-    # Instead of relying on the value set in the module directly, we use the is_causal passed in kwargs if it is presented
-    is_causal = is_causal if is_causal is not None else getattr(module, "is_causal", True)
-
-    # SDPA's Flash Attention (and cuDNN) kernels rely on the `is_causal` flag. However, there are certain conditions:
-    # - Not in decoding phase (otherwise we want full attention on the single query token)
-    # - Attention mask is not to be provided (even if it is a causal pattern)
-    # - Internally, we marked this as compatible with causal, i.e. it is a decoder attention type
-    #
-    # Quirks on the conditionals:
-    # - We avoid inline passing this to the SDPA function directly to support both torch.compile's dynamic shapes and
-    #   full graph options. Otherwise, dynamic shapes are prevented from compiling.
-    # - It is important to check first for the shape, otherwise compile will fail with
-    #   `argument 'is_causal' must be bool, not SymBool`.
-    is_causal = query.shape[2] > 1 and attention_mask is None and is_causal
-
-    # Shapes (e.g. query.shape[2]) are tensors during jit tracing, resulting in `is_causal` being a tensor.
+) -> torch.Tensor:
+    """
+    Standard forward for SDPA attention.
+    """
     # We convert it to a bool for the SDPA kernel that only accepts bools.
+    if is_causal is None:
+        is_causal = False
+        
     if torch.jit.is_tracing() and isinstance(is_causal, torch.Tensor):
         is_causal = is_causal.item()
 
@@ -90,16 +77,73 @@ def sdpa_attention_forward(
             # Convert to boolean type, making sdpa to force call FlashAttentionScore to improve performance.
             attention_mask = torch.logical_not(attention_mask.bool()).to(query.device)
 
-    attn_output = torch.nn.functional.scaled_dot_product_attention(
-        query,
-        key,
-        value,
-        attn_mask=attention_mask,
-        dropout_p=dropout,
-        scale=scaling,
-        is_causal=is_causal,
-        **sdpa_kwargs,
-    )
+    if attention_mask is not None:
+        attention_mask = attention_mask.contiguous()
+
+    # Handle Grouped-Query Attention (GQA)
+    # Skip expansion during tracing as attention_plugin handles it natively
+    if not torch.jit.is_tracing() and query.shape[1] != key.shape[1]:
+        num_q_heads = query.shape[1]
+        num_kv_heads = key.shape[1]
+        if num_q_heads % num_kv_heads == 0:
+            n_rep = num_q_heads // num_kv_heads
+            key = key.repeat_interleave(n_rep, dim=1)
+            value = value.repeat_interleave(n_rep, dim=1)
+        else:
+            raise ValueError(f"Query heads ({num_q_heads}) must be divisible by KV heads ({num_kv_heads}) for GQA")
+
+    if torch.jit.is_tracing():
+        # Call custom trt::attention_plugin operator during tracing
+        from tensorrt_edgellm.llm_models.layers.attention_plugin import attention_plugin
+        
+        # Retrieval logic updated for transformers v5
+        num_q_heads = getattr(module.config, "num_attention_heads", 0)
+        num_kv_heads = getattr(module.config, "num_key_value_heads", num_q_heads)
+        head_size = getattr(module, "head_dim", 0)
+        sliding_window_size = getattr(module, "sliding_window", -1)
+        if sliding_window_size is None: sliding_window_size = -1
+        
+        # We need context_lengths and kvcache_start_index from kwargs
+        context_lengths = kwargs.get("context_lengths")
+        kvcache_start_index = kwargs.get("kvcache_start_index")
+        
+        # If they are missing, create dummy ones for tracing
+        if context_lengths is None:
+            context_lengths = torch.tensor([query.shape[2]], dtype=torch.int32, device=query.device)
+        if kvcache_start_index is None:
+            kvcache_start_index = torch.tensor([0], dtype=torch.int32, device=query.device)
+
+        # Transpose and reshape q, k, v to [B, S, H*D] for the plugin
+        q_plugin = query.transpose(1, 2).reshape(query.shape[0], query.shape[2], -1).contiguous()
+        k_plugin = key.transpose(1, 2).reshape(key.shape[0], key.shape[2], -1).contiguous()
+        v_plugin = value.transpose(1, 2).reshape(value.shape[0], value.shape[2], -1).contiguous()
+        
+        attn_output, present_key_value = attention_plugin(
+            q_plugin,
+            k_plugin,
+            v_plugin,
+            past_key_value,
+            context_lengths,
+            rope_rotary_cos_sin,
+            kvcache_start_index,
+            num_q_heads,
+            num_kv_heads,
+            False, # enable_tree_attention (handled by separate branch if needed)
+            head_size,
+            False, # enable_fp8_kv_cache
+            sliding_window_size
+        )
+        return attn_output, present_key_value
+    else:
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attn_mask=attention_mask,
+            dropout_p=dropout_p,
+            is_causal=is_causal,
+        )
+
     attn_output = attn_output.transpose(1, 2).contiguous()
 
     return attn_output, None

@@ -1608,9 +1608,16 @@ class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, GenerationMixin):
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = Qwen3_5TextModel(config)
-        self.vocab_size = config.vocab_size
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        
+        # Handle both VLM config and text-only config
+        if hasattr(config, "text_config"):
+            text_config = config.text_config
+        else:
+            text_config = config
+            
+        self.model = Qwen3_5TextModel(text_config)
+        self.vocab_size = text_config.vocab_size
+        self.lm_head = nn.Linear(text_config.hidden_size, text_config.vocab_size, bias=False)
 
         # Initialize weights and apply final processing
         self.post_init()

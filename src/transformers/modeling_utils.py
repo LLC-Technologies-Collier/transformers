@@ -1,3 +1,4 @@
+# Some changes Copyright 2026 Google LLC and contributors.
 # Copyright 2018 The Google AI Language Team Authors, Facebook AI Research authors and The HuggingFace Inc. team.
 # Copyright (c) 2018, NVIDIA CORPORATION.  All rights reserved.
 #
@@ -3364,6 +3365,7 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
         token: str | bool | None = None,
         save_peft_format: bool = True,
         save_original_format: bool = True,
+        safe_serialization: bool = True,
         **kwargs,
     ):
         """
@@ -3516,8 +3518,8 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
         ):
             is_offloaded = True
             warnings.warn(
-                "Attempting to save a model with offloaded modules. Ensure that unallocated cpu memory "
-                "exceeds the `shard_size` (50GB default)"
+                f"Attempting to save a model with offloaded modules. Ensure that unallocated cpu memory "
+                f"exceeds the `shard_size` ({max_shard_size} configured)"
             )
 
         # Translate state_dict from smp to hf if saving with smp >= 1.10
@@ -3547,15 +3549,81 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
 
         # Shard the model if it is too big.
         if not _hf_peft_config_loaded:
-            weights_name = SAFE_WEIGHTS_NAME
+            weights_name = SAFE_WEIGHTS_NAME if safe_serialization else WEIGHTS_NAME
             weights_name = _add_variant(weights_name, variant)
         else:
-            weights_name = ADAPTER_SAFE_WEIGHTS_NAME
+            weights_name = ADAPTER_SAFE_WEIGHTS_NAME if safe_serialization else "adapter_model.bin"
 
         filename_pattern = weights_name.replace(".bin", "{suffix}.bin").replace(".safetensors", "{suffix}.safetensors")
+        print(f"[DEBUG] Sharding model with max_shard_size={max_shard_size} and filename_pattern={filename_pattern}")
         state_dict_split = split_torch_state_dict_into_shards(
             state_dict, filename_pattern=filename_pattern, max_shard_size=max_shard_size
         )
+        # Edge-LLM: Handle sharding pathological cases (e.g. 24k shards) due to MoE shared weights
+        if state_dict_split.is_sharded and len(state_dict_split.filename_to_tensors) > 500:
+            print(f"[DEBUG] Excessive shards detected ({len(state_dict_split.filename_to_tensors)}). Consolidating with storage-awareness...")
+            
+            # Map tensors to their underlying storage to avoid double-counting and duplication
+            storage_to_tensors = defaultdict(list)
+            tensor_to_size = {}
+            
+            for name, tensor in state_dict.items():
+                try:
+                    # Use storage() identifier if available, fallback to name for meta-tensors
+                    if tensor.device.type != "meta":
+                        storage_id = id(tensor.untyped_storage())
+                    else:
+                        # For meta tensors, we can't easily check sharing, but we can check if they ARE shared in the model
+                        storage_id = name
+                    
+                    storage_to_tensors[storage_id].append(name)
+                    if name not in tensor_to_size:
+                        tensor_to_size[name] = tensor.numel() * torch.finfo(tensor.dtype).bits // 8
+                except Exception:
+                    storage_to_tensors[name].append(name)
+                    tensor_to_size[name] = tensor.numel() * torch.finfo(tensor.dtype).bits // 8
+
+            consolidated_shards = {}
+            current_shard_idx = 1
+            current_shard_size = 0
+            current_shard_tensors = []
+            
+            # Target ~1GB per consolidated shard to fit in RAM during loading
+            TARGET_SIZE = 1 * 1024 * 1024 * 1024
+            
+            # Iterate through unique storages
+            for storage_id, names in storage_to_tensors.items():
+                # Only count the size of the first tensor in this storage
+                first_name = names[0]
+                storage_size = tensor_to_size[first_name]
+                
+                if current_shard_size + storage_size > TARGET_SIZE and current_shard_tensors:
+                    shard_name = filename_pattern.format(suffix=f"-{current_shard_idx:05d}-of-CONSOLIDATED")
+                    consolidated_shards[shard_name] = current_shard_tensors
+                    current_shard_idx += 1
+                    current_shard_size = 0
+                    current_shard_tensors = []
+                
+                current_shard_tensors.extend(names)
+                current_shard_size += storage_size
+            
+            if current_shard_tensors:
+                shard_name = filename_pattern.format(suffix=f"-{current_shard_idx:05d}-of-CONSOLIDATED")
+                consolidated_shards[shard_name] = current_shard_tensors
+            
+            state_dict_split.filename_to_tensors = consolidated_shards
+            new_tensor_to_filename = {}
+            for s_name, t_names in consolidated_shards.items():
+                for t_name in t_names:
+                    new_tensor_to_filename[t_name] = s_name
+            state_dict_split.tensor_to_filename = new_tensor_to_filename
+            state_dict_split.is_sharded = True
+            print(f"[DEBUG] Consolidated into {len(consolidated_shards)} storage-aware shards")
+
+        if state_dict_split.is_sharded:
+            print(f"[DEBUG] Model sharded into {len(state_dict_split.filename_to_tensors)} shards")
+        else:
+            print("[DEBUG] Model is not sharded")
 
         # Clean the folder from a previous save
         for filename in os.listdir(save_directory):
@@ -3593,6 +3661,15 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
             state_dict_split.filename_to_tensors.items(), desc="Writing model shards"
         ):
             filename = os.path.join(save_directory, shard_file)
+            
+            # WARM RETRY: Skip if shard already exists
+            if os.path.exists(filename):
+                # Still need to pop the tensors from state_dict to keep memory usage low
+                for tensor_name in tensor_names:
+                    if tensor_name in state_dict:
+                        del state_dict[tensor_name]
+                continue
+
             shard_state_dict = {}
             for tensor_name in tensor_names:
                 # Get the tensor, and remove it from state_dict to avoid keeping the ref
@@ -3627,7 +3704,17 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
             # TODO: it would be very nice to do the writing concurrently, but safetensors never releases the GIL,
             # so it's not possible for now....
             # Write the shard to disk
-            safe_save_file(shard_state_dict, filename, metadata=metadata)
+            if safe_serialization:
+                try:
+                    safe_save_file(shard_state_dict, filename, metadata=metadata)
+                except RuntimeError as e:
+                    if "Some tensors share memory" in str(e):
+                        logger.warning(f"Safetensors failed to save shard {filename} due to shared memory tensors. Falling back to torch.save (pickle). Original error: {e}")
+                        torch.save(shard_state_dict, filename)
+                    else:
+                        raise e
+            else:
+                torch.save(shard_state_dict, filename)
             # Cleanup the data before next loop (important with offloading, so we don't blowup cpu RAM)
             del shard_state_dict
 
@@ -3643,7 +3730,7 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
             path_to_weights = os.path.join(save_directory, weights_name)
             logger.info(f"Model weights saved in {path_to_weights}")
         else:
-            save_index_file = SAFE_WEIGHTS_INDEX_NAME
+            save_index_file = SAFE_WEIGHTS_INDEX_NAME if safe_serialization else WEIGHTS_INDEX_NAME
             save_index_file = os.path.join(save_directory, _add_variant(save_index_file, variant))
             # Save the index as well
             with open(save_index_file, "w", encoding="utf-8") as f:

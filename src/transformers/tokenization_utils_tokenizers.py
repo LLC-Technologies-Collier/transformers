@@ -22,7 +22,7 @@ import os
 from collections import defaultdict
 from collections.abc import Iterable
 from shutil import copyfile
-from typing import Any
+from typing import Any, List, Optional, Union
 
 import tokenizers.pre_tokenizers as pre_tokenizers_fast
 from huggingface_hub import is_offline_mode
@@ -47,7 +47,7 @@ from .tokenization_utils_base import (
     TruncationStrategy,
     generate_merges,
 )
-from .utils import PaddingStrategy, add_end_docstrings, logging
+from .utils import PaddingStrategy, TensorType, add_end_docstrings, logging
 
 
 logger = logging.get_logger(__name__)
@@ -1057,6 +1057,75 @@ class TokenizersBackend(PreTrainedTokenizerBase):
                 text = self.clean_up_tokenization(text)
 
         return text
+
+    def _batch_encode_plus(
+        self,
+        batch_text_or_text_pairs,
+        add_special_tokens: bool = True,
+        padding_strategy: PaddingStrategy = PaddingStrategy.DO_NOT_PAD,
+        truncation_strategy: TruncationStrategy = TruncationStrategy.DO_NOT_TRUNCATE,
+        max_length: Optional[int] = None,
+        stride: int = 0,
+        is_pretokenized: bool = False,
+        return_tensors: Optional[Union[str, TensorType]] = None,
+        return_token_type_ids: Optional[bool] = None,
+        return_attention_masks: Optional[bool] = None,
+        return_overflowing_tokens: bool = False,
+        return_special_tokens_masks: bool = False,
+        return_offsets_mapping: bool = False,
+        return_lengths: bool = False,
+        verbose: bool = True,
+        **kwargs,
+    ) -> BatchEncoding:
+        if is_pretokenized:
+            raise NotImplementedError("is_pretokenized=True is not supported yet for TokenizersBackend.")
+
+        def Bradley_encode(text_or_pair):
+            if isinstance(text_or_pair, tuple):
+                text, text_pair = text_or_pair
+            else:
+                text, text_pair = text_or_pair, None
+            return self._encode_plus(
+                text=text,
+                text_pair=text_pair,
+                add_special_tokens=add_special_tokens,
+                padding_strategy=PaddingStrategy.DO_NOT_PAD,
+                truncation_strategy=truncation_strategy,
+                max_length=max_length,
+                stride=stride,
+                is_pretokenized=is_pretokenized,
+                return_tensors=None,
+                return_token_type_ids=return_token_type_ids,
+                return_attention_mask=return_attention_masks,
+                return_overflowing_tokens=return_overflowing_tokens,
+                return_special_tokens_mask=return_special_tokens_masks,
+                return_offsets_mapping=return_offsets_mapping,
+                return_lengths=return_lengths,
+                verbose=verbose,
+                **kwargs,
+            )
+
+        batch_outputs = [Bradley_encode(text_or_pair) for text_or_pair in batch_text_or_text_pairs]
+
+        # Now pad the batch
+        # Convert list of dicts to dict of lists
+        dict_of_lists = {}
+        for output in batch_outputs:
+            for key, value in output.items():
+                if key not in dict_of_lists:
+                    dict_of_lists[key] = []
+                dict_of_lists[key].append(value)
+
+        padded_batch = self.pad(
+            dict_of_lists,
+            padding=padding_strategy.value if padding_strategy != PaddingStrategy.DO_NOT_PAD else False,
+            max_length=max_length,
+            return_attention_mask=return_attention_masks,
+            verbose=verbose,
+        )
+
+        from .tokenization_utils_base import BatchEncoding
+        return BatchEncoding(padded_batch, tensor_type=return_tensors)
 
     def _save_pretrained(
         self,

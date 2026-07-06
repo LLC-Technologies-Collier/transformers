@@ -193,6 +193,98 @@ class Qwen3_5MoeConfig(PreTrainedConfig):
     vision_end_token_id: int = 248054
     tie_word_embeddings: bool = False
 
+    @property
+    def vocab_size(self):
+        return self.text_config.vocab_size
+
+    @property
+    def hidden_size(self):
+        return self.text_config.hidden_size
+
+    @property
+    def num_attention_heads(self):
+        return self.text_config.num_attention_heads
+
+    @property
+    def num_hidden_layers(self):
+        return self.text_config.num_hidden_layers
+
+    @property
+    def num_key_value_heads(self):
+        return self.text_config.num_key_value_heads
+
+    @property
+    def moe_intermediate_size(self):
+        return self.text_config.moe_intermediate_size
+
+    @property
+    def shared_expert_intermediate_size(self):
+        return self.text_config.shared_expert_intermediate_size
+
+    @property
+    def num_experts_per_tok(self):
+        return self.text_config.num_experts_per_tok
+
+    @property
+    def num_experts(self):
+        return self.text_config.num_experts
+
+    @property
+    def norm_eps(self):
+        return self.text_config.rms_norm_eps
+
+    @property
+    def rms_norm_eps(self):
+        return self.text_config.rms_norm_eps
+
+    @property
+    def hidden_act(self):
+        return self.text_config.hidden_act
+
+    @property
+    def max_position_embeddings(self):
+        return self.text_config.max_position_embeddings
+
+    @property
+    def decoder_sparse_step(self):
+        # Qwen3.5 MoE uses a fixed sparse step or none? 
+        # Looking at text_config it's not there. Qwen2Moe uses it.
+        # Let's check text_config defaults.
+        return getattr(self.text_config, "decoder_sparse_step", 1)
+
+    @property
+    def rope_scaling(self):
+        return getattr(self.text_config, "rope_scaling", None)
+
+    @property
+    def rope_theta(self):
+        return getattr(self.text_config, "rope_theta", 1000000.0)
+
+    @property
+    def intermediate_size(self):
+        return getattr(self.text_config, "intermediate_size", 0)
+
+    @property
+    def norm_topk_prob(self):
+        return getattr(self.text_config, "norm_topk_prob", True)
+
+    @property
+    def num_key_value_heads(self):
+        return getattr(self.text_config, "num_key_value_heads", self.num_attention_heads)
+
+    @property
+    def moe_intermediate_size(self):
+        return getattr(self.text_config, "moe_intermediate_size", 0)
+
+    @property
+    def use_mrope(self):
+        return False
+
+    @property
+    def mrope_section(self):
+        # [32, 48, 48] sums to 128, which is 256 // 2 (HeadDim // 2)
+        return [32, 48, 48]
+
     def __post_init__(self, **kwargs):
         if isinstance(self.vision_config, dict):
             # old ckpt with incorrect model type -> override manually

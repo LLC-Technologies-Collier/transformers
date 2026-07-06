@@ -334,10 +334,24 @@ def _grouped_mm(
         # when autocast is enabled we can end up with intermediate tensors in fp32 (e.g. LayerNorm output) and weight tensors in bf16
         # In that case we need to cast the input to the weight dtype to avoid dtype mismatch errors.
         # See: https://github.com/pytorch/pytorch/issues/174763
+        input_c = input.to(weight.dtype)
+        
+        if input_c.data_ptr() % 16 != 0:
+            input_c = input_c.clone()
+            
+        if weight.data_ptr() % 16 != 0 or not weight.is_contiguous():
+            # If weight is transposed, it might not be contiguous or aligned for the kernel
+            weight = weight.contiguous()
+            if weight.data_ptr() % 16 != 0:
+                weight = weight.clone()
+
+        if input_c.data_ptr() % 16 != 0 or weight.data_ptr() % 16 != 0:
+            print(f"[DEBUG] grouped_mm alignment: input_ptr={input_c.data_ptr()}, weight_ptr={weight.data_ptr()}")
+            
         if hasattr(torch.nn.functional, "grouped_mm"):
-            return torch.nn.functional.grouped_mm(input.to(weight.dtype), weight, offs=offs)
+            return torch.nn.functional.grouped_mm(input_c, weight, offs=offs)
         elif hasattr(torch, "_grouped_mm"):
-            return torch._grouped_mm(input.to(weight.dtype), weight, offs=offs)
+            return torch._grouped_mm(input_c, weight, offs=offs)
 
     return torch.ops.transformers.grouped_mm_fallback(input, weight, offs=offs)
 
@@ -401,12 +415,16 @@ def grouped_mm_experts_forward(
     sample_weights_g = sample_weights[perm]
 
     # Compute offsets for grouped_mm
-    # using histc instead of bincount to avoid cuda graph issues
-    # With deterministic algorithms, CPU only supports float input, CUDA only supports int input.
-    # torch.histc() does not support integer dtypes on CPU and MPS.
-    histc_input = expert_ids_g.float() if device.type in ("cpu", "mps") else expert_ids_g.int()
-    tokens_per_expert = torch.histc(histc_input, bins=self.num_experts, min=0, max=self.num_experts - 1)
-    offsets = torch.cumsum(tokens_per_expert, dim=0, dtype=torch.int32)
+    # using bincount instead of histc for ONNX opset 17 compatibility
+    # bincount requires 1D non-negative int tensor
+    bincount_input = expert_ids_g.flatten().int()
+    if bincount_input.is_meta:
+        # Create a dynamic tensor that depends on the input to avoid JIT constant folding
+        # which crashes aten::equal during the CSE optimization pass
+        num_tokens_per_expert = (bincount_input.sum() * 0).view(-1).expand(self.num_experts).to(bincount_input.dtype)
+    else:
+        num_tokens_per_expert = torch.bincount(bincount_input, minlength=self.num_experts)
+    offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
 
     # EP sentinel handling: leave `expert_ids` unclamped so the sort pushes sentinels to the tail,
     # `histc(max=num_experts-1)` drops them from `tokens_per_expert`, and grouped_mm skips rows

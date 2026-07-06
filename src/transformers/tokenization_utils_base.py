@@ -1309,6 +1309,9 @@ class PreTrainedTokenizerBase(PushToHubMixin):
             tokens = [str(tok) for tok in self.__dict__.get("_extra_special_tokens", [])]
             return self.convert_tokens_to_ids(tokens) if key != key_without_id else tokens
 
+        if key == "all_special_tokens_extended":
+            return getattr(self, "all_special_tokens", [])
+
         if key not in self.__dict__:
             # Also check the class hierarchy (handles class-level defaults, e.g. in
             # dynamically loaded remote code where __getattr__ may be called before
@@ -2428,6 +2431,44 @@ class PreTrainedTokenizerBase(PushToHubMixin):
         return padding_strategy, truncation_strategy, max_length, kwargs
 
     @add_end_docstrings(ENCODE_KWARGS_DOCSTRING, ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING)
+    def batch_encode_plus(
+        self,
+        batch_text_or_text_pairs,
+        add_special_tokens: bool = True,
+        padding: bool | str = False,
+        truncation: bool | str = False,
+        max_length: int | None = None,
+        stride: int = 0,
+        is_split_into_words: bool = False,
+        return_tensors: str | TensorType | None = None,
+        return_token_type_ids: bool | None = None,
+        return_attention_mask: bool | None = None,
+        return_overflowing_tokens: bool = False,
+        return_special_tokens_mask: bool = False,
+        return_offsets_mapping: bool = False,
+        return_length: bool = False,
+        verbose: bool = True,
+        **kwargs,
+    ) -> BatchEncoding:
+        return self(
+            text=batch_text_or_text_pairs,
+            add_special_tokens=add_special_tokens,
+            padding=padding,
+            truncation=truncation,
+            max_length=max_length,
+            stride=stride,
+            is_split_into_words=is_split_into_words,
+            return_tensors=return_tensors,
+            return_token_type_ids=return_token_type_ids,
+            return_attention_mask=return_attention_mask,
+            return_overflowing_tokens=return_overflowing_tokens,
+            return_special_tokens_mask=return_special_tokens_mask,
+            return_offsets_mapping=return_offsets_mapping,
+            return_length=return_length,
+            verbose=verbose,
+            **kwargs,
+        )
+
     def __call__(
         self,
         text: TextInput | PreTokenizedInput | list[TextInput] | list[PreTokenizedInput] | None = None,

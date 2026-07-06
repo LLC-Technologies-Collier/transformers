@@ -52,8 +52,10 @@ def and_masks(*mask_functions: Callable) -> Callable:
 
     def and_mask(batch_idx, head_idx, q_idx, kv_idx):
         result = q_idx.new_ones((), dtype=torch.bool)
-        for mask in mask_functions:
-            result = result & mask(batch_idx, head_idx, q_idx, kv_idx).to(result.device)
+        for mask_func in mask_functions:
+            m = mask_func(batch_idx, head_idx, q_idx, kv_idx)
+            # Explicitly convert to bool to avoid integer promotion during tracing
+            result = result & m.to(device=result.device, dtype=torch.bool)
         return result
 
     return and_mask
@@ -171,10 +173,15 @@ def padding_mask_function(padding_mask: torch.Tensor) -> Callable:
     """
 
     def inner_mask(batch_idx: int, head_idx: int, q_idx: int, kv_idx: int) -> bool:
-        # Note that here the mask should ALWAYS be at least of the max `kv_index` size in the dimension 1. This is because
-        # we cannot pad it here in the mask_function as we don't know the final size, and we cannot try/except, as it is not
-        # vectorizable on accelerator devices
-        return padding_mask[batch_idx, kv_idx]
+        # Robustly handle different padding_mask dimensionalities during tracing
+        if padding_mask.dim() == 2:
+            return padding_mask[:, None, None, :]
+        elif padding_mask.dim() == 3:
+            return padding_mask[:, None, :, :]
+        elif padding_mask.dim() == 4:
+            return padding_mask
+        # Fallback for unexpected cases
+        return padding_mask.view(padding_mask.shape[0], 1, -1, padding_mask.shape[-1])
 
     return inner_mask
 
@@ -519,8 +526,23 @@ def sdpa_mask(
     ```
 
     """
+    # For BC on `cache_positions` that used to be an arg at the position of `q_length`
+    if isinstance(q_length, torch.Tensor) and q_length.ndim == 1:
+        logger.warning_once(
+            "`cache_position` is deprecated as an arg, and will be removed in Transformers v5.6. Please use `q_length` and "
+            "`q_offset` instead, similarly to `kv_length` and `kv_offset`"
+        )
+        q_length, q_offset = q_length.shape[0], q_length[0].to(device)
+    
+    # Ensure lengths and offsets are integers even if they are scalar tensors (common during tracing)
+    if isinstance(q_length, torch.Tensor): q_length = int(q_length)
+    if isinstance(kv_length, torch.Tensor): kv_length = int(kv_length)
+    if isinstance(q_offset, torch.Tensor): q_offset = int(q_offset)
+    if isinstance(kv_offset, torch.Tensor): kv_offset = int(kv_offset)
     # Potentially pad the 2D mask
     padding_mask = prepare_padding_mask(attention_mask, kv_length, kv_offset)
+
+    print(f"sdpa_mask: q_len={q_length}, kv_len={kv_length}, q_off={q_offset}, kv_off={kv_offset}, has_padding_mask={padding_mask is not None}")
 
     # Under specific conditions, we can avoid materializing the mask
     #   1. Causal masks can rely on the `is_causal` argument
@@ -719,6 +741,20 @@ def flex_attention_mask(
         device (`torch.device` or `str`, optional):
             An optional device to create the mask on.
     """
+    # For BC on `cache_positions` that used to be an arg at the position of `q_length`
+    if isinstance(q_length, torch.Tensor) and q_length.ndim == 1:
+        logger.warning_once(
+            "`cache_position` is deprecated as an arg, and will be removed in Transformers v5.6. Please use `q_length` and "
+            "`q_offset` instead, similarly to `kv_length` and `kv_offset`"
+        )
+        q_length, q_offset = q_length.shape[0], q_length[0].to(device)
+    
+    # Ensure lengths and offsets are integers even if they are scalar tensors (common during tracing)
+    if isinstance(q_length, torch.Tensor): q_length = int(q_length)
+    if isinstance(kv_length, torch.Tensor): kv_length = int(kv_length)
+    if isinstance(q_offset, torch.Tensor): q_offset = int(q_offset)
+    if isinstance(kv_offset, torch.Tensor): kv_offset = int(kv_offset)
+
     # Potentially add the padding 2D mask
     if attention_mask is not None:
         # Older torch (2.5.x) cannot handle sequences not in multiples of 128 (default block size)
